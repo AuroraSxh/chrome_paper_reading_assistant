@@ -23,7 +23,7 @@ export default defineManifest({
   manifest_version: 3,
   name: 'Paper Reading Assistant',
   description: '在主流学术期刊页面调用 AI 进行总结与对话，记录阅读历史',
-  version: '0.1.0',
+  version: '0.2.0',
   permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'tabs', 'clipboardRead'],
   host_permissions: [
     ...PUBLISHER_MATCHES,
