@@ -14,6 +14,10 @@ export interface ArticleRow {
   tags: string[];
   favorite: 0 | 1;
   kind?: 'html' | 'pdf';
+  /** Lightweight markdown index of memories for this article, always injected into prompt. */
+  memoryIndex?: string;
+  /** Free-form user notes (markdown). */
+  userNotes?: string;
 }
 
 export interface SummaryRow {
@@ -46,12 +50,28 @@ export interface KvRow {
   value: unknown;
 }
 
+export type MemoryType = 'finding' | 'interpretation' | 'question' | 'user-note' | 'cross-ref';
+
+export interface MemoryRow {
+  id: string;
+  /** undefined = global / cross-article memory. */
+  articleId?: string;
+  type: MemoryType;
+  title: string;
+  body: string;
+  tags?: string[];
+  createdAt: number;
+  updatedAt: number;
+  source: 'ai' | 'user';
+}
+
 export class PaperDB extends Dexie {
   articles!: Table<ArticleRow, string>;
   summaries!: Table<SummaryRow, number>;
   conversations!: Table<ConversationRow, number>;
   messages!: Table<MessageRow, number>;
   kv!: Table<KvRow, string>;
+  memories!: Table<MemoryRow, string>;
 
   constructor() {
     super('paper-ai');
@@ -66,6 +86,9 @@ export class PaperDB extends Dexie {
     });
     this.version(3).stores({
       kv: 'key',
+    });
+    this.version(4).stores({
+      memories: 'id, articleId, type, updatedAt, *tags',
     });
   }
 }

@@ -3,6 +3,7 @@ import type { AppConfig, ProviderId } from '../lib/messages';
 import { defaultConfig, loadConfig, saveConfig } from '../lib/config';
 import { DEFAULT_BASE_URL, DEFAULT_MODELS, MODEL_LABELS } from '../lib/llm';
 import { getSubfolder, getVaultHandle, pickVault, setSubfolder, setVaultHandle } from '../lib/obsidian';
+import { downloadBackup, exportAllAsJson, importFromJson, pickAndReadJson, type ImportMode } from '../lib/backup';
 
 const PROVIDERS: { id: ProviderId; label: string; hint?: string }[] = [
   { id: 'deepseek', label: 'DeepSeek' },
@@ -187,10 +188,69 @@ export function Options() {
         </div>
       </fieldset>
 
+      <BackupSection />
+
       <p className="text-xs text-gray-500 mt-6">
         API Key 仅保存在本地浏览器（chrome.storage.local），不会上传任何服务器。
         所有 LLM 请求由扩展的 Service Worker 直接发往各 Provider。
       </p>
     </div>
+  );
+}
+
+function BackupSection() {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const onExport = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const json = await exportAllAsJson();
+      downloadBackup(json);
+      setMsg('已生成备份 JSON 并触发下载');
+    } catch (e) {
+      setMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBusy(false); }
+  };
+
+  const onImport = async (mode: ImportMode) => {
+    if (mode === 'replace' && !confirm('"替换"会先清空当前所有文章/对话/记忆，再导入备份。确定吗？')) return;
+    setBusy(true); setMsg(null);
+    try {
+      const raw = await pickAndReadJson();
+      const r = await importFromJson(raw, mode);
+      setMsg(`导入完成：articles ${r.articles}, conversations ${r.conversations}, messages ${r.messages}, summaries ${r.summaries}, memories ${r.memories}`);
+    } catch (e) {
+      setMsg(`导入失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <fieldset className="border rounded p-4 mt-6">
+      <legend className="px-2 text-sm font-semibold">数据备份与恢复</legend>
+      <p className="text-[11px] text-gray-500 mb-2">
+        所有阅读历史、对话、记忆都存在 IndexedDB（绑定扩展 ID）。<strong>移除扩展再重装会换 ID 导致数据访问不到</strong>，建议定期导出备份。导出文件不含 API Key 和 Obsidian Vault 句柄。
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          className="border rounded px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-40"
+          onClick={() => { void onExport(); }}
+          disabled={busy}
+        >📤 导出备份 (JSON)</button>
+        <button
+          className="border rounded px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-40"
+          onClick={() => { void onImport('merge'); }}
+          disabled={busy}
+          title="只覆盖同 id 的记录，保留当前已有但备份里没有的数据"
+        >📥 导入并合并</button>
+        <button
+          className="border rounded px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-40"
+          onClick={() => { void onImport('replace'); }}
+          disabled={busy}
+          title="先清空当前所有数据再导入"
+        >⚠️ 导入并替换</button>
+        {msg && <span className="text-xs text-gray-700">{msg}</span>}
+      </div>
+    </fieldset>
   );
 }

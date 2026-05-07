@@ -1,5 +1,5 @@
 import type { Article } from '../messages';
-import { db, type ArticleRow, type ConversationRow, type MessageRow, type SummaryRow } from './schema';
+import { db, type ArticleRow, type ConversationRow, type MemoryRow, type MemoryType, type MessageRow, type SummaryRow } from './schema';
 
 const TRACKING_PARAMS = new Set([
   'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
@@ -175,4 +175,70 @@ export async function listTags(): Promise<string[]> {
   const set = new Set<string>();
   for (const a of all) for (const t of a.tags) set.add(t);
   return [...set].sort();
+}
+
+export async function setUserNotes(id: string, notes: string): Promise<void> {
+  await db.articles.update(id, { userNotes: notes });
+}
+
+export async function setMemoryIndex(articleId: string, memoryIndex: string): Promise<void> {
+  await db.articles.update(articleId, { memoryIndex });
+}
+
+function uuid(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export async function addMemory(input: Omit<MemoryRow, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): Promise<string> {
+  const now = Date.now();
+  const id = input.id ?? uuid();
+  await db.memories.put({
+    id,
+    articleId: input.articleId,
+    type: input.type,
+    title: input.title,
+    body: input.body,
+    tags: input.tags,
+    source: input.source,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return id;
+}
+
+export async function updateMemory(id: string, patch: Partial<Omit<MemoryRow, 'id' | 'createdAt'>>): Promise<void> {
+  await db.memories.update(id, { ...patch, updatedAt: Date.now() });
+}
+
+export async function deleteMemory(id: string): Promise<void> {
+  await db.memories.delete(id);
+}
+
+export async function getMemoriesForArticle(articleId: string): Promise<MemoryRow[]> {
+  return db.memories.where('articleId').equals(articleId).reverse().sortBy('updatedAt');
+}
+
+export async function getMemoriesByType(articleId: string, type: MemoryType): Promise<MemoryRow[]> {
+  const all = await getMemoriesForArticle(articleId);
+  return all.filter((m) => m.type === type);
+}
+
+/** Cross-article memories whose tags overlap with the given tags. Excludes the current article. */
+export async function getCrossRefMemories(tags: string[], excludeArticleId?: string, limit = 5): Promise<MemoryRow[]> {
+  if (!tags.length) {
+    // Fallback: return latest cross-ref entries regardless of tag overlap.
+    const arr = await db.memories.where('type').equals('cross-ref').reverse().sortBy('updatedAt');
+    return arr.filter((m) => m.articleId !== excludeArticleId).slice(0, limit);
+  }
+  const tagSet = new Set(tags.map((t) => t.toLowerCase()));
+  const all = await db.memories.where('type').equals('cross-ref').reverse().sortBy('updatedAt');
+  const matched: MemoryRow[] = [];
+  for (const m of all) {
+    if (m.articleId === excludeArticleId) continue;
+    const mt = (m.tags ?? []).map((t) => t.toLowerCase());
+    if (mt.some((t) => tagSet.has(t))) matched.push(m);
+    if (matched.length >= limit) break;
+  }
+  return matched;
 }

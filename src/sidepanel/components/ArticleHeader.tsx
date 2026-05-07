@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useStore } from '../store';
 import { triggerExtract } from '../extract';
-import { articleIdOf, getOrCreateConversation, listMessages, setFavorite, upsertArticle } from '../../lib/db/repo';
+import { articleIdOf, getMemoriesForArticle, listMessages, setFavorite, upsertArticle } from '../../lib/db/repo';
 import { db } from '../../lib/db/schema';
 import { exportToVault } from '../../lib/obsidian';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -63,8 +63,15 @@ export function ArticleHeader() {
         .where('articleId').equals(id)
         .reverse().sortBy('updatedAt').then((r) => r[0]);
       const messages = conv?.id ? await listMessages(conv.id) : [];
-      const { path } = await exportToVault({ article: row, summary: summaryRow, messages });
-      setExportMsg(`已导出: ${path}`);
+      const memories = await getMemoriesForArticle(id);
+      const { path, overwritten } = await exportToVault({
+        articleId: id,
+        article: row,
+        summary: summaryRow,
+        messages,
+        memories,
+      });
+      setExportMsg(`${overwritten ? '已覆盖' : '已导出'}: ${path}`);
     } catch (e) {
       setExportMsg(e instanceof Error ? e.message : String(e));
     }

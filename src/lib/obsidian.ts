@@ -1,4 +1,4 @@
-import { db, type ArticleRow, type MessageRow, type SummaryRow } from './db/schema';
+import { db, type ArticleRow, type MemoryRow, type MessageRow, type SummaryRow } from './db/schema';
 
 const HANDLE_KEY = 'obsidian-vault-handle';
 const SUBFOLDER_KEY = 'obsidian-subfolder';
@@ -71,13 +71,19 @@ function escapeYaml(s: string): string {
 }
 
 export interface ExportPayload {
+  /** Stable article identifier — used as the canonical primary key in frontmatter. */
+  articleId: string;
   article: ArticleRow;
   summary?: SummaryRow;
   messages?: MessageRow[];
+  memories?: MemoryRow[];
 }
 
-export function renderMarkdown({ article, summary, messages }: ExportPayload): string {
+export function renderMarkdown({ articleId, article, summary, messages, memories }: ExportPayload): string {
   const fmLines: string[] = ['---'];
+  // article_id is the canonical primary key for idempotent re-export. Quote
+  // because DOIs contain `/` and `:` which are YAML reserved characters.
+  fmLines.push(`article_id: ${escapeYaml(articleId)}`);
   fmLines.push(`title: ${escapeYaml(article.title)}`);
   if (article.journal) fmLines.push(`journal: ${escapeYaml(article.journal)}`);
   if (article.doi) fmLines.push(`doi: ${escapeYaml(article.doi)}`);
@@ -102,6 +108,31 @@ export function renderMarkdown({ article, summary, messages }: ExportPayload): s
   if (article.abstract) {
     out.push('## Abstract', '', article.abstract, '');
   }
+  if (article.memoryIndex && article.memoryIndex.trim()) {
+    out.push('## Memory Index', '', article.memoryIndex.trim(), '');
+  }
+  if (memories && memories.length) {
+    out.push('## Memories', '');
+    const grouped = new Map<string, MemoryRow[]>();
+    for (const m of memories) {
+      const arr = grouped.get(m.type) ?? [];
+      arr.push(m);
+      grouped.set(m.type, arr);
+    }
+    const order = ['finding', 'interpretation', 'question', 'cross-ref', 'user-note'] as const;
+    for (const t of order) {
+      const arr = grouped.get(t);
+      if (!arr?.length) continue;
+      out.push(`### ${t}`, '');
+      for (const m of arr) {
+        out.push(`- **${m.title}**`, '');
+        out.push(m.body.split('\n').map((l) => `  ${l}`).join('\n'), '');
+      }
+    }
+  }
+  if (article.userNotes && article.userNotes.trim()) {
+    out.push('## My Notes', '', article.userNotes.trim(), '');
+  }
   if (summary?.content) {
     out.push('## AI 总结', '');
     out.push(`> ${summary.provider} / ${summary.model} · ${new Date(summary.createdAt).toLocaleString()}`, '');
@@ -122,7 +153,45 @@ export function renderMarkdown({ article, summary, messages }: ExportPayload): s
   return out.join('\n');
 }
 
-export async function exportToVault(payload: ExportPayload): Promise<{ path: string }> {
+const ARTICLE_ID_RE = /^article_id:\s*("?)(.*?)\1\s*$/m;
+
+/** Find an existing .md file in `dir` whose frontmatter `article_id` equals the given id. */
+async function findExistingByArticleId(
+  dir: FileSystemDirectoryHandle,
+  articleId: string,
+): Promise<{ name: string; handle: FileSystemFileHandle } | null> {
+  // FileSystemDirectoryHandle exposes async iterators in Chrome via .entries().
+  // Cast as `any` to avoid lib.dom typing gaps in the current TypeScript target.
+  const entries = (dir as unknown as { entries(): AsyncIterableIterator<[string, FileSystemHandle]> }).entries?.bind(dir);
+  if (!entries) return null;
+  for await (const entry of entries()) {
+    const [name, handle] = entry;
+    if (handle.kind !== 'file') continue;
+    if (!name.toLowerCase().endsWith('.md')) continue;
+    try {
+      const fileHandle = handle as FileSystemFileHandle;
+      const file = await fileHandle.getFile();
+      // Read only the head of the file — frontmatter is always near the top.
+      const head = await file.slice(0, 2048).text();
+      if (!head.startsWith('---')) continue;
+      const m = head.match(ARTICLE_ID_RE);
+      if (m && m[2] === articleId) {
+        return { name, handle: fileHandle };
+      }
+    } catch {
+      // ignore unreadable files
+    }
+  }
+  return null;
+}
+
+function shortHash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i += 1) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36).slice(0, 6);
+}
+
+export async function exportToVault(payload: ExportPayload): Promise<{ path: string; overwritten: boolean }> {
   const root = await getVaultHandle();
   if (!root) throw new Error('尚未选择 Obsidian Vault 文件夹，请先到设置中选择');
   await ensurePermission(root);
@@ -130,24 +199,37 @@ export async function exportToVault(payload: ExportPayload): Promise<{ path: str
   const subfolder = await getSubfolder();
   const dir = subfolder ? await getOrCreateSubdir(root, subfolder) : root;
 
-  const md = renderMarkdown(payload);
-  const baseName = sanitizeFilename(payload.article.title);
-  let name = `${baseName}.md`;
-  let n = 0;
-  // Disambiguate filename if it exists.
-  while (true) {
+  // 1) Try to find an existing file by frontmatter article_id — overwrite it.
+  const existing = await findExistingByArticleId(dir, payload.articleId);
+  let name: string;
+  let fileHandle: FileSystemFileHandle;
+  let overwritten = false;
+  if (existing) {
+    name = existing.name;
+    fileHandle = existing.handle;
+    overwritten = true;
+  } else {
+    // 2) No existing file — create one. If filename collides with another
+    //    article (rare), append a short hash of articleId so the new file
+    //    doesn't overwrite an unrelated note.
+    const baseName = sanitizeFilename(payload.article.title);
+    name = `${baseName}.md`;
     try {
       await dir.getFileHandle(name, { create: false });
-      n += 1;
-      name = `${baseName}-${n}.md`;
+      // Collision with a different article — disambiguate via stable hash.
+      name = `${baseName} (${shortHash(payload.articleId)}).md`;
     } catch {
-      break;
+      // free, use as-is.
     }
+    fileHandle = await dir.getFileHandle(name, { create: true });
   }
 
-  const file = await dir.getFileHandle(name, { create: true });
-  const stream = await file.createWritable();
+  // Preserve firstRead from existing frontmatter if we are overwriting and
+  // the in-memory article happens to have a later firstReadAt (shouldn't,
+  // but defensive).
+  const md = renderMarkdown(payload);
+  const stream = await fileHandle.createWritable();
   await stream.write(md);
   await stream.close();
-  return { path: subfolder ? `${subfolder}/${name}` : name };
+  return { path: subfolder ? `${subfolder}/${name}` : name, overwritten };
 }

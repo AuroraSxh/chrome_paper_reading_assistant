@@ -3,6 +3,8 @@ import { PORT_NAME } from '../lib/messages';
 import { loadConfig } from '../lib/config';
 import { createProvider } from '../lib/llm';
 import { db } from '../lib/db/schema';
+import { extractMemoriesFromTurn, rebuildMemoryIndex, MEMORY_REBUILD_TURN_THRESHOLD } from '../lib/memory';
+import type { ChatMessage } from '../lib/messages';
 
 const SIDE_PANEL_PATH = 'src/sidepanel/index.html';
 
@@ -126,7 +128,7 @@ interface InflightEntry {
 }
 const inflight = new Map<string, InflightEntry>();
 
-async function persistResult(entry: InflightEntry, fullText: string): Promise<void> {
+async function persistResult(entry: InflightEntry, fullText: string, originalUserMessages: ChatMessage[]): Promise<void> {
   if (!entry.articleId || !fullText.trim()) return;
   try {
     if (entry.channel === 'summary') {
@@ -156,9 +158,36 @@ async function persistResult(entry: InflightEntry, fullText: string): Promise<vo
         createdAt: Date.now(),
       });
       await db.conversations.update(convId, { updatedAt: Date.now() });
+      // Fire-and-forget long-term memory extraction. Never block chat reply.
+      void extractAndIndexMemories(entry.articleId, originalUserMessages, fullText);
     }
   } catch (e) {
     console.warn('[paper-ai] persistResult failed', e);
+  }
+}
+
+async function extractAndIndexMemories(articleId: string, sentMessages: ChatMessage[], assistantReply: string): Promise<void> {
+  try {
+    const article = await db.articles.get(articleId);
+    if (!article) return;
+    const recent: ChatMessage[] = [
+      ...sentMessages.filter((m) => m.role !== 'system').slice(-4),
+      { role: 'assistant', content: assistantReply },
+    ];
+    const saved = await extractMemoriesFromTurn({ article, recentMessages: recent });
+    if (saved.length === 0) return;
+    // Count message turns in this article's conversation; rebuild index periodically.
+    const conv = await db.conversations.where('articleId').equals(articleId).reverse().sortBy('updatedAt').then((r) => r[0]);
+    if (!conv?.id) return;
+    const msgCount = await db.messages.where('conversationId').equals(conv.id).count();
+    if (msgCount > 0 && msgCount % MEMORY_REBUILD_TURN_THRESHOLD === 0) {
+      await rebuildMemoryIndex(articleId);
+    } else if (!article.memoryIndex) {
+      // First memory ever — also seed an index so it shows up in next prompt.
+      await rebuildMemoryIndex(articleId);
+    }
+  } catch (e) {
+    console.warn('[paper-ai] memory extraction pipeline failed', e);
   }
 }
 
@@ -217,7 +246,7 @@ chrome.runtime.onConnect.addListener((port) => {
               try { entry.port?.postMessage({ type: 'DELTA', requestId: msg.requestId, channel: msg.channel, text }); } catch { /* port gone */ }
             },
           });
-          await persistResult(entry, fullText);
+          await persistResult(entry, fullText, msg.messages);
           try { entry.port?.postMessage({ type: 'DONE', requestId: msg.requestId, channel: msg.channel, fullText }); } catch { /* port gone */ }
         } catch (e) {
           if ((e as Error).name === 'AbortError' || ctrl.signal.aborted) {

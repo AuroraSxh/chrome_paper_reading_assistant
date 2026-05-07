@@ -4,6 +4,8 @@ import { portClient } from '../port';
 import { Markdown } from './Markdown';
 import { CHAT_SYSTEM, SELECTION_SYSTEM, buildArticleContext, buildSelectionContext } from '../../shared/prompts';
 import { appendMessage, articleIdOf, getOrCreateConversation, upsertArticle } from '../../lib/db/repo';
+import { db } from '../../lib/db/schema';
+import { buildMemoryPromptBlocks } from '../../lib/memory';
 import { newRequestId } from '../../lib/messages';
 
 export function ChatPanel() {
@@ -73,6 +75,18 @@ export function ChatPanel() {
     const ctxMessages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
       { role: 'system', content: selText ? SELECTION_SYSTEM : CHAT_SYSTEM },
     ];
+    // Inject long-term memory (per-article + cross-article) as an extra system
+    // message so it survives prompt-injection sanitization on article body.
+    if (article) {
+      try {
+        const aid = articleIdOf(article);
+        const row = await db.articles.get(aid);
+        if (row) {
+          const memBlock = await buildMemoryPromptBlocks(row);
+          if (memBlock) ctxMessages.push({ role: 'system', content: memBlock });
+        }
+      } catch { /* best-effort */ }
+    }
     if (article) {
       const ctx = selText
         ? buildSelectionContext(selText, article, cfg.contextMaxChars ?? 60_000)

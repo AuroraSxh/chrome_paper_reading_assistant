@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ProviderBar } from './components/ProviderBar';
 import { ArticleHeader } from './components/ArticleHeader';
+import { CurrentArticleMemory } from './components/CurrentArticleMemory';
 import { ChatPanel } from './components/ChatPanel';
 import { HistoryView } from './components/HistoryView';
 import { ArticleDetail } from './components/ArticleDetail';
@@ -124,6 +125,7 @@ export function App() {
         {tab === 'current' ? (
           <div className="flex flex-col h-full">
             <ArticleHeader />
+            <CurrentArticleMemory />
             <div className="flex-1 min-h-0">
               <ChatPanel />
             </div>
