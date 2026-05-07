@@ -1,6 +1,8 @@
-# Chrome Paper Reading Assistant
+# Paper Reading Assistant
 
-在主流学术期刊页面调用 AI 进行总结与对话，记录阅读历史的 Chrome 扩展。
+在主流学术期刊页面调用 AI 进行总结与对话，记录阅读历史的浏览器扩展。
+
+兼容 **Chrome / Microsoft Edge** 及其他 Chromium 内核浏览器。
 
 ## 特性
 
@@ -11,15 +13,36 @@
 - 阅读历史持久化（IndexedDB / Dexie）
 - 可选导出对话至 Obsidian 库
 
+## 平台支持
+
+| 平台 | 状态 | 说明 |
+|---|---|---|
+| Google Chrome 114+ | ✅ 完全支持 | 主要测试目标 |
+| Microsoft Edge 114+ | ✅ 完全支持 | 同一份 zip 直接加载，所有功能可用 |
+| Brave / Arc / Opera / Vivaldi | ✅ 理论兼容 | 均为 Chromium 内核，未做深度测试 |
+| Safari | ⏸ 暂未支持 | 需 Xcode 重打包并改造侧边栏 UI，欢迎 PR |
+| Adobe Acrobat Reader/Pro 桌面软件 | ❌ 不支持 | 桌面 Acrobat 不是浏览器，扩展无法接入；但**已支持** Adobe Acrobat **Chrome 扩展**打开的 PDF |
+
 ## 安装方式
 
 ### 方式一：普通用户（推荐）
 
 1. 前往 [Releases 页面](https://github.com/AuroraSxh/chrome_paper_reading_assistant/releases) 下载最新版本的 `paper-reading-assistant-vX.X.X.zip`
 2. 解压到任意目录
-3. 打开 Chrome `chrome://extensions`，开启右上角的「开发者模式」
+
+#### 在 Chrome 中安装
+
+3. 打开 `chrome://extensions`，开启右上角的「开发者模式」
 4. 点击「加载已解压的扩展程序」，选择刚才解压出的文件夹
 5. 打开扩展选项页，填入对应服务商的 API Key
+
+#### 在 Microsoft Edge 中安装
+
+3. 打开 `edge://extensions`，开启左下角的「开发人员模式」
+4. 点击「加载解压缩的扩展」，选择刚才解压出的文件夹
+5. 打开扩展选项页，填入对应服务商的 API Key
+
+> 💡 加载本地 PDF 时，需要在扩展详情里额外开启「**允许访问文件 URL** / Allow access to file URLs」。
 
 ### 方式二：开发者从源码构建
 
@@ -32,7 +55,7 @@ npm install
 npm run build
 ```
 
-构建产物位于 `dist/`，按方式一第 3-5 步加载即可。
+构建产物位于 `dist/`，按方式一对应步骤加载即可。
 
 开发模式：
 
