@@ -161,6 +161,7 @@ export async function deleteArticle(id: string): Promise<void> {
     }
   }
   await db.summaries.where('articleId').equals(id).delete();
+  await db.memories.where('articleId').equals(id).delete();
 }
 
 export async function listJournals(): Promise<string[]> {

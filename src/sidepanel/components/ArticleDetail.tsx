@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import type { ArticleRow } from '../../lib/db/schema';
 import { db } from '../../lib/db/schema';
@@ -63,7 +63,7 @@ export function ArticleDetail({ article, onBack }: Props) {
 
   const memories = useLiveQuery(() => getMemoriesForArticle(article.id), [article.id]);
   const [notesDraft, setNotesDraft] = useState<string>(article.userNotes ?? '');
-  React.useEffect(() => { setNotesDraft(article.userNotes ?? ''); }, [article.id, article.userNotes]);
+  useEffect(() => { setNotesDraft(article.userNotes ?? ''); }, [article.id, article.userNotes]);
   const saveNotes = async () => {
     if (notesDraft === (article.userNotes ?? '')) return;
     await setUserNotes(article.id, notesDraft);

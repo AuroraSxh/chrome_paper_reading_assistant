@@ -100,6 +100,9 @@ export function ChatPanel() {
     let articleId: string | undefined;
     if (article) {
       try {
+        // App.tsx already upserted on article load, but call again defensively
+        // in case the user sent a chat before the load effect resolved. This
+        // is idempotent (repo.upsertArticle updates lastReadAt + missing fields).
         articleId = await upsertArticle(article);
         const convId = await getOrCreateConversation(articleId);
         await appendMessage(convId, { role: 'user', content: userText });

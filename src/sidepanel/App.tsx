@@ -10,7 +10,7 @@ import { portClient } from './port';
 import type { ArticleRow } from '../lib/db/schema';
 import { db } from '../lib/db/schema';
 import { triggerExtract } from './extract';
-import { articleIdOf, getLatestSummary, listMessages } from '../lib/db/repo';
+import { articleIdOf, getLatestSummary, listMessages, upsertArticle } from '../lib/db/repo';
 
 type Tab = 'current' | 'history';
 
@@ -80,6 +80,12 @@ export function App() {
     if (!article) return;
     let cancelled = false;
     (async () => {
+      // Eagerly create/refresh the article row so that:
+      // 1) memory injection on the very first chat turn can find it,
+      // 2) user notes / tags can be saved before any chat happens,
+      // 3) all downstream code can rely on `db.articles.get(id)` returning a row.
+      await upsertArticle(article);
+      if (cancelled) return;
       const id = articleIdOf(article);
       const [sum, conv] = await Promise.all([
         getLatestSummary(id),
@@ -125,7 +131,11 @@ export function App() {
         {tab === 'current' ? (
           <div className="flex flex-col h-full">
             <ArticleHeader />
-            <CurrentArticleMemory />
+            {/* Cap memory panel so a long memory list / notes textarea can't push
+                the chat input out of the viewport. */}
+            <div className="shrink-0 max-h-[40vh] overflow-auto">
+              <CurrentArticleMemory />
+            </div>
             <div className="flex-1 min-h-0">
               <ChatPanel />
             </div>

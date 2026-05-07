@@ -64,10 +64,26 @@ function sanitizeFilename(s: string): string {
 }
 
 function escapeYaml(s: string): string {
-  if (/[:#\-\[\]{}&*!|>'"%@`]/.test(s) || /^\s|\s$/.test(s)) {
-    return `"${s.replace(/"/g, '\\"')}"`;
-  }
-  return s;
+  // Strip ASCII control chars that produce invalid YAML and could only have
+  // landed here via attacker-controlled article text or paste accidents.
+  const cleaned = s.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
+  // Always double-quote — covers `,` `#` leading-`?` reserved words (yes/no/null/true/on)
+  // and is uniformly round-trippable. Escape `\` and `"`.
+  return `"${cleaned.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Tag-friendly variant of escapeYaml. Obsidian's tag pane historically does
+ * not register quoted YAML tag entries, so we only quote when strictly
+ * necessary (whitespace or YAML-special chars present).
+ */
+function escapeYamlTag(s: string): string {
+  const cleaned = s.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
+  // Obsidian tags: must start with a letter or underscore, may contain
+  // letters/digits/`_`/`-`/`/` (nested tags). Anything else needs quoting,
+  // since unquoted invalid tags are silently dropped from Obsidian's index.
+  if (/^[A-Za-z_][A-Za-z0-9_\-\/]*$/.test(cleaned)) return cleaned;
+  return `"${cleaned.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 export interface ExportPayload {
@@ -79,7 +95,7 @@ export interface ExportPayload {
   memories?: MemoryRow[];
 }
 
-export function renderMarkdown({ articleId, article, summary, messages, memories }: ExportPayload): string {
+export function renderMarkdown({ articleId, article, summary, messages, memories, firstReadOverride }: ExportPayload & { firstReadOverride?: string }): string {
   const fmLines: string[] = ['---'];
   // article_id is the canonical primary key for idempotent re-export. Quote
   // because DOIs contain `/` and `:` which are YAML reserved characters.
@@ -92,13 +108,16 @@ export function renderMarkdown({ articleId, article, summary, messages, memories
     fmLines.push('authors:');
     for (const a of article.authors) fmLines.push(`  - ${escapeYaml(a)}`);
   }
-  fmLines.push(`firstRead: ${new Date(article.firstReadAt).toISOString()}`);
+  // Preserve firstRead from the existing vault file if present — that's the
+  // true "first time exported", which we should never clobber on re-export.
+  const firstReadIso = firstReadOverride ?? new Date(article.firstReadAt).toISOString();
+  fmLines.push(`firstRead: ${firstReadIso}`);
   fmLines.push(`lastRead: ${new Date(article.lastReadAt).toISOString()}`);
   if (article.kind) fmLines.push(`kind: ${article.kind}`);
   if (article.favorite) fmLines.push('favorite: true');
   if (article.tags?.length) {
     fmLines.push('tags:');
-    for (const t of article.tags) fmLines.push(`  - ${escapeYaml(t)}`);
+    for (const t of article.tags) fmLines.push(`  - ${escapeYamlTag(t)}`);
   }
   fmLines.push('---', '');
 
@@ -153,15 +172,51 @@ export function renderMarkdown({ articleId, article, summary, messages, memories
   return out.join('\n');
 }
 
-const ARTICLE_ID_RE = /^article_id:\s*("?)(.*?)\1\s*$/m;
+const ARTICLE_ID_RE = /^article_id:\s*(?:"([^"]*)"|'([^']*)'|(\S.*?))\s*$/m;
+const FIRST_READ_RE = /^firstRead:\s*(\S.*?)\s*$/m;
+
+interface ExistingFileMatch {
+  name: string;
+  handle: FileSystemFileHandle;
+  firstReadIso?: string;
+}
+
+/** Read the YAML frontmatter block of an .md file and return its raw text. */
+async function readFrontmatter(fileHandle: FileSystemFileHandle): Promise<string | null> {
+  const file = await fileHandle.getFile();
+  // Try sizes 16KB → 64KB → whole file so unusually large frontmatter (long
+  // memory index + many memories) still gets matched; very few files will
+  // exceed 16KB so the second/third reads are rarely paid.
+  const sizes = [16_384, 65_536, file.size];
+  for (const limit of sizes) {
+    const head = await file.slice(0, Math.min(limit, file.size)).text();
+    if (!head.startsWith('---')) return null;
+    const after = head.slice(3);
+    const closeIdx = after.search(/^\s*---\s*$/m);
+    if (closeIdx >= 0) return after.slice(0, closeIdx);
+    if (limit >= file.size) return null;
+  }
+  return null;
+}
+
+function articleIdFromFrontmatter(fm: string): string | null {
+  const m = fm.match(ARTICLE_ID_RE);
+  if (!m) return null;
+  return m[1] ?? m[2] ?? m[3] ?? null;
+}
+
+function firstReadFromFrontmatter(fm: string): string | undefined {
+  const m = fm.match(FIRST_READ_RE);
+  if (!m) return undefined;
+  // Strip surrounding quotes if the prior file double- or single-quoted the value.
+  return m[1].replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+}
 
 /** Find an existing .md file in `dir` whose frontmatter `article_id` equals the given id. */
 async function findExistingByArticleId(
   dir: FileSystemDirectoryHandle,
   articleId: string,
-): Promise<{ name: string; handle: FileSystemFileHandle } | null> {
-  // FileSystemDirectoryHandle exposes async iterators in Chrome via .entries().
-  // Cast as `any` to avoid lib.dom typing gaps in the current TypeScript target.
+): Promise<ExistingFileMatch | null> {
   const entries = (dir as unknown as { entries(): AsyncIterableIterator<[string, FileSystemHandle]> }).entries?.bind(dir);
   if (!entries) return null;
   for await (const entry of entries()) {
@@ -170,13 +225,10 @@ async function findExistingByArticleId(
     if (!name.toLowerCase().endsWith('.md')) continue;
     try {
       const fileHandle = handle as FileSystemFileHandle;
-      const file = await fileHandle.getFile();
-      // Read only the head of the file — frontmatter is always near the top.
-      const head = await file.slice(0, 2048).text();
-      if (!head.startsWith('---')) continue;
-      const m = head.match(ARTICLE_ID_RE);
-      if (m && m[2] === articleId) {
-        return { name, handle: fileHandle };
+      const fm = await readFrontmatter(fileHandle);
+      if (!fm) continue;
+      if (articleIdFromFrontmatter(fm) === articleId) {
+        return { name, handle: fileHandle, firstReadIso: firstReadFromFrontmatter(fm) };
       }
     } catch {
       // ignore unreadable files
@@ -204,10 +256,12 @@ export async function exportToVault(payload: ExportPayload): Promise<{ path: str
   let name: string;
   let fileHandle: FileSystemFileHandle;
   let overwritten = false;
+  let firstReadOverride: string | undefined;
   if (existing) {
     name = existing.name;
     fileHandle = existing.handle;
     overwritten = true;
+    firstReadOverride = existing.firstReadIso;
   } else {
     // 2) No existing file — create one. If filename collides with another
     //    article (rare), append a short hash of articleId so the new file
@@ -224,10 +278,7 @@ export async function exportToVault(payload: ExportPayload): Promise<{ path: str
     fileHandle = await dir.getFileHandle(name, { create: true });
   }
 
-  // Preserve firstRead from existing frontmatter if we are overwriting and
-  // the in-memory article happens to have a later firstReadAt (shouldn't,
-  // but defensive).
-  const md = renderMarkdown(payload);
+  const md = renderMarkdown({ ...payload, firstReadOverride });
   const stream = await fileHandle.createWritable();
   await stream.write(md);
   await stream.close();

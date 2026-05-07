@@ -50,6 +50,10 @@ export interface ImportResult {
 
 export type ImportMode = 'merge' | 'replace';
 
+interface ConvRowLoose { id?: number; articleId: string; createdAt: number; updatedAt: number; title?: string }
+interface MsgRowLoose { id?: number; conversationId: number; role: 'system' | 'user' | 'assistant'; content: string; createdAt: number }
+interface SumRowLoose { id?: number; articleId: string; model: string; provider: string; content: string; createdAt: number }
+
 export async function importFromJson(raw: string, mode: ImportMode = 'merge'): Promise<ImportResult> {
   const parsed = JSON.parse(raw) as Partial<BackupBundle>;
   if (!parsed || typeof parsed !== 'object') throw new Error('备份文件格式无效');
@@ -64,12 +68,68 @@ export async function importFromJson(raw: string, mode: ImportMode = 'merge'): P
         db.messages.clear(),
         db.memories.clear(),
       ]);
+      // Also wipe serializable kv (preserve the vault handle, which is stored
+      // here but not in the backup). Otherwise stale subfolder paths survive.
+      const kvAll = await db.kv.toArray();
+      for (const r of kvAll) {
+        if (!NON_SERIALIZABLE_KV_KEYS.has(r.key)) await db.kv.delete(r.key);
+      }
     }
-    if (parsed.articles?.length) await db.articles.bulkPut(parsed.articles as Parameters<typeof db.articles.bulkPut>[0]);
-    if (parsed.summaries?.length) await db.summaries.bulkPut(parsed.summaries as Parameters<typeof db.summaries.bulkPut>[0]);
-    if (parsed.conversations?.length) await db.conversations.bulkPut(parsed.conversations as Parameters<typeof db.conversations.bulkPut>[0]);
-    if (parsed.messages?.length) await db.messages.bulkPut(parsed.messages as Parameters<typeof db.messages.bulkPut>[0]);
-    if (parsed.memories?.length) await db.memories.bulkPut(parsed.memories as Parameters<typeof db.memories.bulkPut>[0]);
+    // articles.id is the stable articleId string — bulkPut by id is the right op.
+    if (parsed.articles?.length) {
+      await db.articles.bulkPut(parsed.articles as Parameters<typeof db.articles.bulkPut>[0]);
+    }
+    // memories.id is a stable uuid — bulkPut by id is fine.
+    if (parsed.memories?.length) {
+      await db.memories.bulkPut(parsed.memories as Parameters<typeof db.memories.bulkPut>[0]);
+    }
+
+    // For autoincrement tables (summaries / conversations / messages) we MUST
+    // strip incoming ids when merging into a non-empty DB; otherwise an
+    // imported conversation with id=3 may overwrite an unrelated existing
+    // conversation 3, silently re-parenting messages across articles.
+    //
+    // In `replace` mode the DB was just cleared so original ids round-trip
+    // exactly; in `merge` mode we let Dexie auto-assign and rebuild the FK
+    // (messages.conversationId) via an old→new conversation id map.
+    if (mode === 'replace') {
+      if (parsed.summaries?.length) await db.summaries.bulkPut(parsed.summaries as SumRowLoose[]);
+      if (parsed.conversations?.length) await db.conversations.bulkPut(parsed.conversations as ConvRowLoose[]);
+      if (parsed.messages?.length) await db.messages.bulkPut(parsed.messages as MsgRowLoose[]);
+    } else {
+      // merge — strip ids
+      if (parsed.summaries?.length) {
+        const rows = (parsed.summaries as SumRowLoose[]).map(({ id: _id, ...r }) => r);
+        await db.summaries.bulkAdd(rows);
+      }
+      const convIdMap = new Map<number, number>();
+      if (parsed.conversations?.length) {
+        for (const c of parsed.conversations as ConvRowLoose[]) {
+          const oldId = c.id;
+          const { id: _id, ...rest } = c;
+          const newId = (await db.conversations.add(rest)) as number;
+          if (oldId != null) convIdMap.set(oldId, newId);
+        }
+      }
+      if (parsed.messages?.length) {
+        // Pre-fetch existing conversation IDs in case a backup contains
+        // messages whose conversations are missing from `parsed.conversations`
+        // but already exist in the target DB (rare but legal).
+        const existingConvIds = new Set<number>(
+          (await db.conversations.toCollection().primaryKeys()) as number[],
+        );
+        const remapped = (parsed.messages as MsgRowLoose[])
+          .map(({ id: _id, ...m }) => {
+            const remappedId = convIdMap.get(m.conversationId);
+            return { ...m, conversationId: remappedId ?? m.conversationId };
+          })
+          // Drop genuinely orphaned messages — attaching them to an unrelated
+          // existing conversation would silently leak chat into another article.
+          .filter((m) => convIdMap.has(m.conversationId) || existingConvIds.has(m.conversationId));
+        if (remapped.length) await db.messages.bulkAdd(remapped);
+      }
+    }
+
     if (parsed.kv?.length) {
       for (const row of parsed.kv) {
         if (NON_SERIALIZABLE_KV_KEYS.has((row as { key: string }).key)) continue;

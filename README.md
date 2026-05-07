@@ -6,6 +6,21 @@
 
 ## 更新日志
 
+### v0.3.1 (2026-05-07)
+
+四轮 subagent 深度审查后的硬化与修复（综合得分 66 → 93/100）：
+
+- 🔒 **Prompt injection 加固**：sanitizer 现覆盖带属性标签 `<article-memory foo="bar">`、全角 `＜...＞`、ChatML/Llama/Mistral 分隔符（`<|system|>`/`[INST]`/`<im_start>`/`</s>`）、控制字符 + DEL、双向覆盖 / 零宽 / BOM；写入与发射两端均消毒（防止旧版本残留数据继续注入）。
+- 🐛 **跨文章记忆死路修复**：`memory.ts` 中 cross-ref memory 此前被错误绑到来源文章并被自身 ID 排除，从未在任何地方出现。改为全局存储（`articleId=undefined`），现在能在主题相关的新文章中正确召回。
+- 🐛 **Turn-1 记忆与笔记修复**：`App.tsx` 在文章加载时立即 `upsertArticle`，否则首轮对话和首次写笔记会因 article row 不存在而静默失败。
+- 🐛 **Obsidian `firstRead` 不再被覆盖**：重新导出会读取 vault 中已存在文件的 frontmatter，保留真实首次导出时间；frontmatter 扫描自适应增长 16K → 64K → 全文，长 memory index 不再因截断而漏匹配。
+- 🐛 **备份合并模式数据隔离**：自增 ID 被剥离并通过 old→new 映射重建 `conversationId`；孤儿消息会被丢弃而非附到无关的对话上（防跨文章泄漏）。Replace 模式同时清空 kv（保留 vault 句柄）。
+- 🐛 **Service Worker 端口路由**：新连接的 sidepanel 不再劫持其他 panel 正在进行的流。
+- 🐛 **deleteArticle 级联**：删除文章时同步清理其 `memories` 行，避免孤儿。
+- 🐛 **取消信号贯通**：用户中止对话也会取消后台的记忆抽取 LLM 调用，不再静默烧 token。
+- 🐛 **YAML 标签兼容**：tags 仅在必要时引号，避免 Obsidian 标签面板因引号而漏识别；同时校验为 Obsidian 合法 tag 形式。
+- 🐛 **CJK 标题去重**：中文标题改用字符 bigram 比较；之前因没有空白分词永远不会被判重。
+
 ### v0.3.0 (2026-05-07)
 
 - 🧠 **文章级长期记忆系统**：仿 Claude Code memory 的类型化结构（finding / interpretation / question / user-note / cross-ref），每轮对话后 LLM 自动抽取新记忆并去重；累计 6 轮对话重建 markdown 索引。

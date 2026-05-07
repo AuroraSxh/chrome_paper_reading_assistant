@@ -158,23 +158,26 @@ async function persistResult(entry: InflightEntry, fullText: string, originalUse
         createdAt: Date.now(),
       });
       await db.conversations.update(convId, { updatedAt: Date.now() });
-      // Fire-and-forget long-term memory extraction. Never block chat reply.
-      void extractAndIndexMemories(entry.articleId, originalUserMessages, fullText);
+      // Fire-and-forget long-term memory extraction. Reuses the entry's
+      // AbortController so an aborted chat also cancels the extraction LLM
+      // call (which can otherwise run for up to 30s after the user moves on).
+      void extractAndIndexMemories(entry.articleId, originalUserMessages, fullText, entry.ctrl.signal);
     }
   } catch (e) {
     console.warn('[paper-ai] persistResult failed', e);
   }
 }
 
-async function extractAndIndexMemories(articleId: string, sentMessages: ChatMessage[], assistantReply: string): Promise<void> {
+async function extractAndIndexMemories(articleId: string, sentMessages: ChatMessage[], assistantReply: string, signal?: AbortSignal): Promise<void> {
   try {
+    if (signal?.aborted) return;
     const article = await db.articles.get(articleId);
     if (!article) return;
     const recent: ChatMessage[] = [
       ...sentMessages.filter((m) => m.role !== 'system').slice(-4),
       { role: 'assistant', content: assistantReply },
     ];
-    const saved = await extractMemoriesFromTurn({ article, recentMessages: recent });
+    const saved = await extractMemoriesFromTurn({ article, recentMessages: recent, signal });
     if (saved.length === 0) return;
     // Count message turns in this article's conversation; rebuild index periodically.
     const conv = await db.conversations.where('articleId').equals(articleId).reverse().sortBy('updatedAt').then((r) => r[0]);
@@ -197,7 +200,12 @@ chrome.runtime.onConnect.addListener((port) => {
     try { port.postMessage(m); } catch { /* port closed */ }
   };
 
-  for (const entry of inflight.values()) entry.port = port;
+  // Re-attach this port ONLY to inflight entries that were already orphaned
+  // (port=null after a previous disconnect). Without this guard, opening a
+  // second sidepanel hijacks streams from the first.
+  for (const entry of inflight.values()) {
+    if (entry.port === null) entry.port = port;
+  }
 
   port.onMessage.addListener(async (msg: PanelToBg) => {
     try {

@@ -25,7 +25,8 @@ export function CurrentArticleMemory() {
 
   const saveNotes = async () => {
     if (notesDraft === (row?.userNotes ?? '')) return;
-    // Ensure the article row exists before writing notes.
+    // App.tsx eagerly upserts the article on load, so `row` should exist by
+    // the time the user can blur this textarea. If it doesn't (race), bail.
     if (!row) return;
     await setUserNotes(id, notesDraft);
   };
